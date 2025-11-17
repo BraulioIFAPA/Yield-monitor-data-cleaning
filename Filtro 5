@@ -4,7 +4,7 @@ library(sf)
 
 # --- 2. Carga de datos ---
 gdf_clean <- st_read("yield_cleaned.shp", quiet = TRUE)
-roads     <- st_read("roads.shp",        quiet = TRUE)
+roads     <- st_read("Put_here_the_name_of_the_file_with_the_existing_paths_in_the_field.shp", quiet = TRUE)
 
 # --- 3. Filtro 1: eliminar puntos a ≤10 m de caminos ---
 th_roads   <- 10
