@@ -1,0 +1,35 @@
+# --- 1. Carga de paquetes y directorio de trabajo ---
+library(sf)
+
+# --- 2. Carga de datos ---
+pts   <- st_read("yield_no_roads.shp",     quiet = TRUE)  # puntos ya limpios
+strps <- st_read("Put_here_the_name_of_the_line_or_polygon_file_that_defines_the_treatments.shp",   quiet = TRUE)  # líneas o polígonos que definen los tratamientos
+
+# --- 3. Parámetro ---
+th_treat <- 8  # metros
+
+# --- 4. Cálculo de distancias y máscara ---
+# 4.1 matriz distancias: cada punto vs cada línea
+d_mat <- st_distance(pts, strps)
+
+# 4.2 distancia mínima por punto
+min_d <- apply(d_mat, 1, min)
+
+# 4.3 puntos a eliminar
+mask_t <- as.numeric(min_d) <= th_treat
+
+# 4.4 nueva capa sin esos puntos
+pts2 <- pts[!mask_t, ]
+
+# 4.5 mensaje de resumen
+cat("Puntos antes del filtro 2:", nrow(pts), "\n")
+cat("Eliminados a ≤", th_treat, "m de líneas de tratamiento:", sum(mask_t), "\n")
+cat("Puntos restantes:", nrow(pts2), "\n")
+
+# --- 5. Guardar resultado ---
+st_write(pts2,
+         "yield_no_treatchange.shp",
+         delete_layer = TRUE,
+         quiet = TRUE)
+
+cat("Shapefile guardado como yield_no_treatchange.shp\n")
