@@ -1,0 +1,24 @@
+library(sf)
+
+# Carga de datos
+pts <- st_read("yield_no_treatchange.shp", quiet = TRUE)
+
+# Percentiles 1 % y 99 %
+qs <- quantile(pts$VEHICLSPEE, c(0.01, 0.99), na.rm = TRUE)
+th_speed_min <- qs[1]
+th_speed_max <- qs[2]
+
+# Filtro
+mask_speed <- (pts$VEHICLSPEE < th_speed_min) | (pts$VEHICLSPEE > th_speed_max)
+pts_speed_filtered <- pts[!mask_speed, ]
+
+# Mensaje
+cat(sprintf("Filtro velocidad percentiles [%.2f, %.2f] km/h: eliminados %d de %d puntos\n",
+            th_speed_min, th_speed_max,
+            sum(mask_speed), nrow(pts)))
+
+# Guarda
+st_write(pts_speed_filtered,
+         "yield_speed_filtered.shp",
+         delete_layer = TRUE,
+         quiet = TRUE)
