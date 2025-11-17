@@ -1,0 +1,44 @@
+library(sf)
+
+# --- 1) Carga de datos (entrada y salida solicitadas) ---
+pts <- st_read("yield_speed_filtered.shp", quiet = TRUE)
+
+# --- 2) Parámetros editables ---
+field_heading <- "Heading"                 # <- Cambia aquí el nombre del campo si fuese necesario
+keep_ranges   <- list(c(270, 290),         # <- Rango 1 a mantener (incluye extremos)
+                      c(90, 110))          # <- Rango 2 a mantener (incluye extremos)
+# Para añadir más rangos: p.ej., keep_ranges <- list(c(270,290), c(90,110), c(10,20))
+
+# --- 3) Construir máscara de puntos a mantener (dentro de alguno de los rangos) ---
+h <- pts[[field_heading]]
+if (!is.numeric(h)) stop(sprintf("El campo '%s' debe ser numérico (0–360 grados).", field_heading))
+
+mask_keep <- rep(FALSE, length(h))
+for (r in keep_ranges) {
+  if (length(r) != 2) stop("Cada rango debe ser un vector de longitud 2: c(min, max).")
+  mask_keep <- mask_keep | (h >= r[1] & h <= r[2])
+}
+mask_keep[is.na(h)] <- FALSE  # descartar NAs
+
+# --- 4) Aplicar filtro (eliminar fuera de rango) ---
+pts_heading_filtered <- pts[mask_keep, ]
+
+# --- 5) Mensaje/resumen ---
+total_original <- nrow(pts)
+total_final    <- nrow(pts_heading_filtered)
+total_removed  <- total_original - total_final
+perc_removed   <- if (total_original > 0) 100 * total_removed / total_original else NA_real_
+
+rangos_txt <- paste0(
+  vapply(keep_ranges, function(r) sprintf("[%.2f, %.2f]", r[1], r[2]), character(1)),
+  collapse = " U "
+)
+
+cat(sprintf("Filtro Heading en %s: mantenidos %d de %d (eliminados %d, %.2f%%)\n",
+            rangos_txt, total_final, total_original, total_removed, perc_removed))
+
+# --- 6) Guardar ---
+st_write(pts_heading_filtered,
+         "yield_unexpected_direction.shp",
+         delete_layer = TRUE,
+         quiet = TRUE)
