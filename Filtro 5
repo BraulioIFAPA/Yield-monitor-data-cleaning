@@ -1,0 +1,29 @@
+# --- 1. Carga paquetes y define directorio de trabajo ---
+library(sf)
+
+
+# --- 2. Carga de datos ---
+gdf_clean <- st_read("yield_cleaned.shp", quiet = TRUE)
+roads     <- st_read("roads.shp",        quiet = TRUE)
+
+# --- 3. Filtro 1: eliminar puntos a ≤10 m de caminos ---
+th_roads   <- 10
+
+# Calcula distancia mínima de cada punto al conjunto de líneas de caminos
+d_roads_mat  <- st_distance(gdf_clean, roads)    # matriz n_puntos × n_caminos
+min_d_roads  <- apply(d_roads_mat, 1, min)       # distancia mínima por punto
+
+mask_roads   <- as.numeric(min_d_roads) <= th_roads
+gdf_no_roads <- gdf_clean[!mask_roads, ]
+
+cat("Puntos originales:", nrow(gdf_clean), "\n")
+cat("Eliminados cerca de caminos (≤", th_roads, "m):", sum(mask_roads), "\n")
+cat("Puntos restantes:", nrow(gdf_no_roads), "\n\n")
+
+# --- 4. Guarda el resultado ---
+st_write(gdf_no_roads,
+         "yield_no_roads.shp",
+         delete_layer = TRUE,
+         quiet = TRUE)
+
+cat("Shapefile limpio sin datos junto a caminos: yield_no_roads.shp\n")
