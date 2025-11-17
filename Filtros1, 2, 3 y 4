@@ -1,0 +1,89 @@
+# --- PARÁMETROS ------------------------------------------------------------
+file_yield    <- "yield_data.shp"     
+file_field    <- "field_boundary.shp"
+out_file      <- "yield_cleaned.shp"
+
+th_yield_zero <- 0
+th_edge       <- 10
+th_sd         <- 3
+th_nb_dist    <- 40
+alpha_global  <- 0.05
+cook_factor   <- 4
+
+# --- CARGA DE PAQUETES -----------------------------------------------------
+library(sf)
+library(spdep)
+library(stats)
+
+# --- 1. Carga de datos -----------------------------------------------------
+gdf0 <- st_read(file_yield, quiet = TRUE)
+gdf0$yield <- as.numeric(gdf0$VRYIELDMAS)
+
+field <- st_read(file_field, quiet = TRUE)
+n0    <- nrow(gdf0)
+cat("Total puntos originales:", n0, "\n")
+
+# --- 2. Paso 1: Filtros globales --------------------------------------------
+gdf1 <- gdf0
+
+mask1  <- gdf1$yield <= th_yield_zero
+gdf1   <- gdf1[!mask1, ]
+n1_rem <- sum(mask1)
+cat("Paso 1.1 - Eliminados yield <=", th_yield_zero, ":", n1_rem, "\n")
+
+dists  <- st_distance(gdf1, st_boundary(field))
+mask2  <- as.numeric(dists) <= th_edge
+gdf1   <- gdf1[!mask2, ]
+n2_rem <- sum(mask2)
+cat("Paso 1.2 - Eliminados a <=", th_edge, "m del borde:", n2_rem, "\n")
+
+mu     <- mean(gdf1$yield)
+sigma  <- sd(gdf1$yield)
+mask3  <- gdf1$yield < (mu - th_sd*sigma) | gdf1$yield > (mu + th_sd*sigma)
+gdf1   <- gdf1[!mask3, ]
+n3_rem <- sum(mask3)
+cat(sprintf("Paso 1.3 - Eliminados fuera de [mu±%s SD]: %d\n", th_sd, n3_rem))
+
+n1 <- nrow(gdf1)
+cat("Total tras Paso 1:", n1, "\n\n")
+
+# --- 3. Paso 2a: Local Moran’s I (con filtro de vecinos) --------------------
+coords <- st_coordinates(gdf1)
+nb     <- dnearneigh(coords, 0, th_nb_dist, longlat = FALSE)
+nbsizes <- card(nb)
+has_neigh <- nbsizes > 0
+
+# Filtrar puntos sin vecinos
+gdf1_neigh <- gdf1[has_neigh, , drop = FALSE]
+coords_neigh <- st_coordinates(gdf1_neigh)
+nb <- dnearneigh(coords_neigh, 0, th_nb_dist, longlat = FALSE)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+lm_res <- localmoran(gdf1_neigh$yield, lw, zero.policy = TRUE)
+I_i    <- lm_res[, 1]
+p_raw  <- lm_res[, 5]
+p_adj  <- p.adjust(p_raw, method = "bonferroni")
+mask4  <- (I_i < 0) & (p_adj < alpha_global)
+gdf2   <- gdf1_neigh[!mask4, , drop = FALSE]
+n4_rem <- sum(mask4)
+cat("Paso 2a - Eliminados Local Moran I inliers:", n4_rem, "\n")
+
+# --- 4. Paso 2b: Moran scatter + Cook's D -----------------------------------
+lag_yield <- lag.listw(lw, gdf2$yield, zero.policy = TRUE)
+df_fit    <- data.frame(yield = gdf2$yield, lag = lag_yield)
+fit       <- lm(yield ~ lag, data = df_fit)
+
+n5       <- nrow(df_fit)
+cooks.D  <- cooks.distance(fit)
+mask5    <- cooks.D > (cook_factor / n5)
+gdf3     <- gdf2[!mask5, , drop = FALSE]
+n5_rem   <- sum(mask5)
+cat("Paso 2b - Eliminados puntos influyentes (Cook's D):", n5_rem, "\n")
+
+n_final <- nrow(gdf3)
+cat("Total puntos finales tras limpieza completa:", n_final, "\n")
+cat(sprintf("Porcentaje total eliminado: %.1f%%\n\n", 100 * (n0 - n_final) / n0))
+
+# --- 5. Guardar resultado ---------------------------------------------------
+st_write(gdf3, out_file, delete_layer = TRUE, quiet = TRUE)
+cat("Shapefile limpio generado en:", out_file, "\n")
