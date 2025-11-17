@@ -1,0 +1,34 @@
+# --- 1. Carga de librerías ---
+library(sf)
+library(ggplot2)
+
+
+capa_inicial  <- st_read("nombre_capa_inicial.shp", quiet = TRUE)
+capa_final <- st_read("nombre_capa_final.shp", quiet = TRUE)
+
+# --- 2. Identificar supervivientes vs eliminados según IsoTime ---
+keep      <- capa_inicial$IsoTime %in% capa_final$IsoTime
+survivors <- capa_inicial[keep, ]
+removed   <- capa_inicial[!keep, ]
+
+# --- 3. Gráfico comparativo con título centrado y tamaño duplicado ---
+ggplot() +
+  geom_sf(data = survivors, color = "grey70", size = 0.6) +
+  geom_sf(data = removed,   color = "red",    size = 0.6) +
+  theme_void() +
+  ggtitle("Filtro X") +
+  theme(
+    plot.title = element_text(size = rel(2),  # doble tamaño relativo
+                              hjust = 0.5)     # centrar el título
+  )
+
+# --- 4. Resumen de puntos ---
+total_original <- nrow(capa_inicial)
+total_final    <- nrow(survivors)
+total_removed  <- nrow(removed)
+perc_removed   <- (total_removed / total_original) * 100
+
+cat("Total puntos originales:", total_original, "\n")
+cat("Total puntos eliminados:", total_removed, "\n")
+cat("Porcentaje eliminado:", round(perc_removed, 2), "%\n")
+
