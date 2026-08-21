@@ -1,24 +1,197 @@
+# =============================================================================
+# FILTRO 7 - ELIMINACIÓN DE REGISTROS CON VELOCIDAD FUERA DE RANGO OPERATIVO
+#
+# Objetivo:
+#   - Eliminar registros con velocidad de cosechadora no operativa.
+#   - Eliminar registros con velocidad de cosechadora fuera del rango operativo
+#     definido por los percentiles 1 % y 99 %, calculados solo sobre velocidades
+#     positivas.
+#
+# Entrada habitual:
+#   - yield_no_treatchange.gpkg
+#
+# Salida:
+#   - yield_speed_filtered.gpkg
+# =============================================================================
+
+
+# --- 1. CARGA DE PAQUETES --------------------------------------------------
+
 library(sf)
 
-# Carga de datos
-pts <- st_read("yield_no_treatchange.shp", quiet = TRUE)
 
-# Percentiles 1 % y 99 %
-qs <- quantile(pts$VEHICLSPEE, c(0.01, 0.99), na.rm = TRUE)
+# --- 2. PARÁMETROS ----------------------------------------------------------
+
+file_yield <- "yield_no_treatchange.gpkg"
+out_file   <- "yield_speed_filtered.gpkg"
+
+# Campo de la tabla de atributos que contiene la velocidad de la cosechadora.
+# Modificar si el archivo usa otro nombre de columna.
+speed_col <- "VEHICLSPEE"
+
+# Unidades de velocidad, solo para mostrar en los mensajes de salida.
+# Lo habitual en datos de cosechadora es km/h.
+speed_units <- "km/h"
+
+# Velocidad mínima no operativa.
+# Los registros con velocidad <= este valor se eliminan antes de calcular percentiles.
+th_speed_zero <- 0
+
+
+# --- 3. FUNCIONES AUXILIARES -----------------------------------------------
+
+check_output_format <- function(out_file) {
+  
+  out_ext <- tolower(tools::file_ext(out_file))
+  
+  if (out_ext == "shp") {
+    stop(
+      paste0(
+        "\nERROR EN EL FORMATO DE SALIDA\n\n",
+        "Has indicado un archivo de salida en formato ESRI Shapefile:\n",
+        "  out_file <- \"", out_file, "\"\n\n",
+        "El formato shapefile puede recortar o modificar los nombres de las columnas ",
+        "de la tabla de atributos.\n\n",
+        "Esto puede afectar a campos como 'row_number', 'VRYIELDMAS', campos de velocidad, ",
+        "dirección u otros atributos necesarios para los filtros y gráficos posteriores.\n\n",
+        "Para conservar correctamente los nombres de los campos, usa GeoPackage:\n",
+        "  out_file <- \"yield_speed_filtered.gpkg\"\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+# --- 4. CARGA DE DATOS ------------------------------------------------------
+
+pts <- st_read(file_yield, quiet = TRUE)
+
+
+# --- 5. COMPROBAR CAMPO DE VELOCIDAD ---------------------------------------
+
+if (!speed_col %in% names(pts)) {
+  
+  available_cols <- paste(names(pts), collapse = ", ")
+  
+  stop(
+    paste0(
+      "\nERROR EN EL CAMPO DE VELOCIDAD\n\n",
+      "No se ha encontrado la columna indicada en speed_col:\n",
+      "  speed_col <- \"", speed_col, "\"\n\n",
+      "Columnas disponibles en la tabla de atributos:\n",
+      available_cols, "\n\n",
+      "Por favor, modifica el parámetro speed_col al inicio del script con el nombre correcto.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+# Crear variable interna de velocidad
+pts$speed <- suppressWarnings(as.numeric(pts[[speed_col]]))
+
+if (all(is.na(pts$speed))) {
+  stop(
+    paste0(
+      "\nERROR EN EL CAMPO DE VELOCIDAD\n\n",
+      "La columna indicada en speed_col existe, pero no se ha podido convertir a valores numéricos.\n",
+      "Campo usado:\n",
+      "  speed_col <- \"", speed_col, "\"\n\n",
+      "Por favor, comprueba que esta columna contiene la velocidad en formato numérico.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+if (any(is.na(pts$speed))) {
+  warning(
+    paste0(
+      "Hay ", sum(is.na(pts$speed)),
+      " valores NA en el campo de velocidad. Se eliminarán en el filtro de velocidad."
+    )
+  )
+}
+
+
+# --- 6. ELIMINAR VELOCIDADES NO OPERATIVAS ---------------------------------
+
+mask_speed_na <- is.na(pts$speed)
+
+mask_speed_zero <- !is.na(pts$speed) &
+  pts$speed <= th_speed_zero
+
+mask_non_operational <- mask_speed_na | mask_speed_zero
+
+pts_operational <- pts[!mask_non_operational, ]
+
+if (nrow(pts_operational) == 0) {
+  stop(
+    paste0(
+      "\nERROR EN EL FILTRO DE VELOCIDAD\n\n",
+      "Después de eliminar valores NA y velocidades <= ", th_speed_zero, " ",
+      speed_units, ", no quedan puntos con velocidad positiva para calcular los percentiles.\n\n",
+      "Comprueba el campo indicado en speed_col y las unidades de velocidad de la capa.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+
+# --- 7. PERCENTILES 1 % Y 99 % SOBRE VELOCIDADES POSITIVAS ------------------
+
+qs <- quantile(
+  pts_operational$speed,
+  probs = c(0.01, 0.99),
+  na.rm = TRUE
+)
+
 th_speed_min <- qs[1]
 th_speed_max <- qs[2]
 
-# Filtro
-mask_speed <- (pts$VEHICLSPEE < th_speed_min) | (pts$VEHICLSPEE > th_speed_max)
+
+# --- 8. FILTRO DE VELOCIDAD POR PERCENTILES ---------------------------------
+
+mask_percentile <- rep(FALSE, nrow(pts))
+
+mask_percentile[!mask_non_operational] <- pts$speed[!mask_non_operational] < th_speed_min |
+  pts$speed[!mask_non_operational] > th_speed_max
+
+mask_speed <- mask_non_operational | mask_percentile
+
 pts_speed_filtered <- pts[!mask_speed, ]
 
-# Mensaje
-cat(sprintf("Filtro velocidad percentiles [%.2f, %.2f] km/h: eliminados %d de %d puntos\n",
-            th_speed_min, th_speed_max,
-            sum(mask_speed), nrow(pts)))
 
-# Guarda
-st_write(pts_speed_filtered,
-         "yield_speed_filtered.shp",
-         delete_layer = TRUE,
-         quiet = TRUE)
+# --- 9. MENSAJE DE RESUMEN --------------------------------------------------
+
+cat("Campo de velocidad usado:", speed_col, "\n")
+cat("Puntos de entrada:", nrow(pts), "\n")
+cat("Eliminados por velocidad NA:", sum(mask_speed_na), "\n")
+cat("Eliminados por velocidad <=", th_speed_zero, speed_units, ":", sum(mask_speed_zero), "\n")
+
+cat(sprintf(
+  "Filtro velocidad percentiles [%.2f, %.2f] %s: eliminados %d de %d puntos con velocidad positiva\n",
+  th_speed_min,
+  th_speed_max,
+  speed_units,
+  sum(mask_percentile),
+  nrow(pts_operational)
+))
+
+cat("Total eliminados por velocidad:", sum(mask_speed), "\n")
+cat("Puntos restantes:", nrow(pts_speed_filtered), "\n\n")
+
+
+# --- 10. GUARDAR RESULTADO --------------------------------------------------
+
+check_output_format(out_file)
+
+st_write(
+  pts_speed_filtered,
+  out_file,
+  delete_layer = TRUE,
+  quiet = TRUE
+)
+
+cat("Archivo guardado como:", out_file, "\n")
