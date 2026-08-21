@@ -1,0 +1,249 @@
+# --- 1. Carga de librerías --------------------------------------------------
+
+library(sf)
+library(ggplot2)
+
+
+# --- 2. Parámetros ----------------------------------------------------------
+
+# file_inicial debe ser la capa antes del filtro que quieres representar.
+# si vienes del Protocolo Base Automatizado (Filtros 1, 2, 3 y 4) se ha debido de crear
+# con el nombre yield_original_row_number.gpkg
+#
+# file_final debe ser la capa después del filtro.
+# si vienes del Protocolo Base Automatizado (Filtros 1, 2, 3 y 4) se ha debido de crear
+# con el nombre yield_cleaned.gpkg
+#
+# En caso de venir de otros filtros, o usar este código para generar gráficos de limpieza de puntos,
+# cambia el nombre de las capas inicial y final a comparar por los nombres de archivos correspondientes
+# Ambas capas deben estar en formato GeoPackage (.gpkg).
+
+file_inicial <- "yield_original_row_number.gpkg"
+file_final   <- "yield_cleaned.gpkg"
+
+id_col <- "row_number"
+
+# Modifica el título del gráfico y el nombre del PNG de salida según el filtro representado.
+titulo_grafico <- "Filtro X"
+out_png <- "grafico_filtro_X.png"
+
+
+# --- 3. Funciones auxiliares ------------------------------------------------
+
+check_input_format <- function(file_path, file_label) {
+  
+  file_ext <- tolower(tools::file_ext(file_path))
+  
+  if (file_ext != "gpkg") {
+    stop(
+      paste0(
+        "\nERROR EN EL FORMATO DE ENTRADA\n\n",
+        "La capa indicada en ", file_label, " no está en formato GeoPackage:\n",
+        "  ", file_label, " <- \"", file_path, "\"\n\n",
+        "Para evitar problemas con nombres de columnas, especialmente con 'row_number', ",
+        "este script de gráficos debe trabajar con capas en formato GeoPackage (.gpkg).\n\n",
+        "Por favor, utiliza como capa inicial y capa final archivos .gpkg generados durante el flujo de limpieza.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+# --- 4. Comprobar formato de entrada ----------------------------------------
+
+check_input_format(file_inicial, "file_inicial")
+check_input_format(file_final, "file_final")
+
+
+# --- 5. Carga de capas ------------------------------------------------------
+
+capa_inicial <- st_read(file_inicial, quiet = TRUE)
+capa_final   <- st_read(file_final, quiet = TRUE)
+
+
+# --- 6. Comprobar existencia de row_number ---------------------------------
+
+mensaje_row_number_final <- paste0(
+  "\nERROR: No se ha encontrado la columna 'row_number' en la capa final.\n\n",
+  "Para comparar correctamente la capa inicial y la capa final, este script necesita ",
+  "una columna 'row_number' que identifique de forma única cada punto original.\n\n",
+  "Si estás usando este script dentro del flujo de limpieza, esta columna debería haberse ",
+  "creado en los Filtros 1, 2, 3 y 4 y conservarse en las capas posteriores.\n\n",
+  "Solución recomendada:\n",
+  "  - Vuelve a ejecutar el flujo de limpieza desde la capa original, empezando por los Filtros 1, 2, 3 y 4.\n",
+  "  - Asegúrate de trabajar con salidas en formato GeoPackage (.gpkg), no en shapefile.\n\n",
+  "Solución alternativa en QGIS:\n",
+  "  1. Abre QGIS y selecciona la capa de puntos original.\n",
+  "  2. Abre la tabla de atributos.\n",
+  "  3. Activa la edición con el lápiz amarillo.\n",
+  "  4. Abre la Calculadora de campos.\n",
+  "  5. Marca la opción 'Crear un campo nuevo'.\n",
+  "  6. En 'Nombre del campo de salida', escribe:\n",
+  "     row_number\n",
+  "  7. En 'Tipo del campo de salida', selecciona:\n",
+  "     Integer / Entero (64 bit)\n",
+  "  8. En el buscador de expresiones, escribe:\n",
+  "     row_number\n",
+  "  9. Cuando aparezca en negrita, haz doble clic sobre él.\n",
+  "  10. Pulsa Aceptar.\n",
+  "  11. Guarda los cambios y desactiva la edición con el lápiz amarillo.\n\n",
+  "IMPORTANTE: si creas 'row_number' manualmente en QGIS, debe hacerse antes de aplicar ",
+  "los filtros de limpieza, no después.\n"
+)
+
+if (!id_col %in% names(capa_final)) {
+  cat(mensaje_row_number_final)
+  stop(
+    "Ejecución detenida: falta la columna 'row_number' en la capa final.",
+    call. = FALSE
+  )
+}
+
+if (!id_col %in% names(capa_inicial)) {
+  stop(
+    paste0(
+      "\nERROR: No se ha encontrado la columna '", id_col, "' en la capa inicial.\n\n",
+      "Para comparar correctamente dos capas, ambas deben compartir un identificador único ",
+      "de los puntos originales.\n\n",
+      "El campo '", id_col, "' debe estar presente en la capa inicial y conservarse en la capa final, ",
+      "para poder distinguir qué puntos se han mantenido y cuáles se han eliminado.\n\n",
+      "Si estás usando este script dentro del flujo de limpieza, utiliza como capa inicial ",
+      "el archivo GeoPackage generado por los Filtros 1, 2, 3 y 4 que contiene la capa original ",
+      "con 'row_number'.\n\n",
+      "Si estás usando este script con otros datos, crea previamente un campo identificador único ",
+      "en la capa inicial, asegúrate de que se conserva en la capa final y modifica el parámetro ",
+      "id_col si ese campo tiene otro nombre.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+
+# --- 7. Comprobar que row_number es válido ---------------------------------
+
+if (any(is.na(capa_inicial[[id_col]]))) {
+  stop(
+    paste0(
+      "\nERROR: la columna '", id_col, "' de la capa inicial contiene valores NA.\n",
+      "No puede usarse como identificador único.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+if (any(is.na(capa_final[[id_col]]))) {
+  stop(
+    paste0(
+      "\nERROR: la columna '", id_col, "' de la capa final contiene valores NA.\n",
+      "No puede usarse como identificador único.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+if (any(duplicated(capa_inicial[[id_col]]))) {
+  stop(
+    paste0(
+      "\nERROR: la columna '", id_col, "' de la capa inicial contiene valores duplicados.\n",
+      "Debe identificar de forma única cada punto original.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+if (any(duplicated(capa_final[[id_col]]))) {
+  stop(
+    paste0(
+      "\nERROR: la columna '", id_col, "' de la capa final contiene valores duplicados.\n",
+      "Debe identificar de forma única cada punto conservado.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+ids_inicial <- as.character(capa_inicial[[id_col]])
+ids_final   <- as.character(capa_final[[id_col]])
+
+if (!all(ids_final %in% ids_inicial)) {
+  stop(
+    paste0(
+      "\nERROR: hay valores de '", id_col, "' en la capa final que no existen en la capa inicial.\n\n",
+      "Esto indica que la capa inicial no corresponde exactamente a la capa original usada ",
+      "para generar la capa final, o que el identificador '", id_col, "' no se ha conservado correctamente.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+
+# --- 8. Identificar supervivientes vs eliminados según row_number -----------
+
+keep      <- ids_inicial %in% ids_final
+survivors <- capa_inicial[keep, ]
+removed   <- capa_inicial[!keep, ]
+
+
+# --- 9. Gráfico comparativo con título centrado y tamaño duplicado ----------
+
+p <- ggplot() +
+  geom_sf(data = survivors, color = "grey70", size = 0.6) +
+  geom_sf(data = removed,   color = "red",    size = 0.6) +
+  theme_void() +
+  ggtitle(titulo_grafico) +
+  theme(
+    plot.title = element_text(size = rel(2),
+                              hjust = 0.5)
+  )
+
+print(p)
+
+
+# --- 10. Guardar gráfico en PNG de alta calidad -----------------------------
+
+if (!requireNamespace("ragg", quietly = TRUE)) {
+  stop(
+    "\nERROR: falta el paquete 'ragg'.\n\n",
+    "Instálalo una vez con:\n",
+    "install.packages(\"ragg\")\n",
+    call. = FALSE
+  )
+}
+
+bbox <- st_bbox(capa_inicial)
+
+aspect_ratio <- as.numeric(
+  (bbox["ymax"] - bbox["ymin"]) /
+    (bbox["xmax"] - bbox["xmin"])
+)
+
+png_width_cm  <- 24
+png_height_cm <- png_width_cm * aspect_ratio
+
+ggsave(
+  filename = out_png,
+  plot = p,
+  device = ragg::agg_png,
+  width = png_width_cm,
+  height = png_height_cm,
+  units = "cm",
+  dpi = 600,
+  bg = "white",
+  limitsize = FALSE
+)
+
+cat("Gráfico guardado en:", out_png, "\n")
+
+
+# --- 11. Resumen de puntos --------------------------------------------------
+
+total_original <- nrow(capa_inicial)
+total_final    <- nrow(survivors)
+total_removed  <- nrow(removed)
+perc_removed   <- (total_removed / total_original) * 100
+
+cat("Total puntos originales:", total_original, "\n")
+cat("Total puntos eliminados:", total_removed, "\n")
+cat("Porcentaje eliminado:", round(perc_removed, 2), "%\n")
