@@ -1,7 +1,40 @@
+# =============================================================================
+# PROTOCOLO BASE AUTOMATIZADO
+# Versión limpia con CRS métrico obligatorio, IQR local robusto
+# e identificador único row_number
+#
+# Requisito:
+#   - Los datos de entrada deben estar ya en un CRS proyectado en metros.
+#   - No usar EPSG:4326 - WGS 84 para ejecutar este script.
+#
+# Las salidas se guardan en el mismo CRS métrico de las capas de entrada.
+# =============================================================================
+
+
 # --- PARÁMETROS ------------------------------------------------------------
-file_yield    <- "yield_data.shp"     
-file_field    <- "field_boundary.shp"
-out_file      <- "yield_cleaned.shp"
+
+# Modificar yield_data y field_boundary por los archivos de datos brutos original y parcela correspondientes
+file_yield <- "yield_data.shp"
+file_field <- "field_boundary.shp"
+
+# Archivo original convertido a GeoPackage con row_number.
+# Este archivo debe usarse como file_inicial en el script de gráficos
+# cuando se compare la capa original con la salida limpia de Vega.
+out_original_file <- "yield_original_row_number.gpkg"
+
+# Archivo limpio final
+out_file <- "yield_cleaned.gpkg"
+
+# Generar archivo original en GeoPackage con row_number
+write_original_gpkg <- TRUE
+
+# Campo de la tabla de atributos que contiene el rendimiento a limpiar.
+# Modificar si el shapefile usa otro nombre de columna.
+yield_col <- "VRYIELDMAS"
+
+# Campo identificador único para comparar capas iniciales y finales.
+# Si no existe, el script lo crea automáticamente.
+id_col <- "row_number"
 
 th_yield_zero <- 0
 th_edge       <- 10
@@ -10,80 +43,703 @@ th_nb_dist    <- 40
 alpha_global  <- 0.05
 cook_factor   <- 4
 
+# Regla robusta local tipo IQR:
+# Q1_local - 1.5 * IQR_local
+# Q3_local + 1.5 * IQR_local
+th_local_iqr <- 1.5
+
+# Protección técnica frente a vecindarios con IQR local muy pequeño.
+# Mantener este valor para reproducir la versión validada.
+th_iqr_floor <- 0.10
+
+# Histograma comparativo antes/después de la limpieza
+make_histogram <- TRUE
+hist_file <- "hist_rendimiento_original_vs_limpio.png"
+
+
 # --- CARGA DE PAQUETES -----------------------------------------------------
+
 library(sf)
 library(spdep)
 library(stats)
 
-# --- 1. Carga de datos -----------------------------------------------------
-gdf0 <- st_read(file_yield, quiet = TRUE)
-gdf0$yield <- as.numeric(gdf0$VRYIELDMAS)
 
+# --- FUNCIONES AUXILIARES --------------------------------------------------
+
+format_crs_info <- function(obj) {
+  
+  crs_obj <- st_crs(obj)
+  epsg_obj <- crs_obj$epsg
+  
+  units_obj <- tryCatch(
+    crs_obj$units_gdal,
+    error = function(e) NA_character_
+  )
+  
+  if (is.null(units_obj) || length(units_obj) == 0) {
+    units_obj <- NA_character_
+  }
+  
+  if (!is.na(epsg_obj)) {
+    crs_txt <- paste0("EPSG:", epsg_obj)
+  } else {
+    crs_txt <- crs_obj$input
+  }
+  
+  if (!is.na(units_obj)) {
+    
+    units_lower <- tolower(units_obj)
+    
+    units_txt <- if (units_lower %in% c("metre", "meter", "metres", "meters", "m")) {
+      "metros"
+    } else if (units_lower %in% c("degree", "degrees", "degree minute second")) {
+      "grados"
+    } else {
+      units_obj
+    }
+    
+    crs_txt <- paste0(crs_txt, " | unidades: ", units_txt)
+  }
+  
+  return(crs_txt)
+}
+
+
+check_projected_metric_crs <- function(obj, obj_name) {
+  
+  crs_obj <- st_crs(obj)
+  
+  if (is.na(crs_obj)) {
+    stop(
+      paste0(
+        "\nERROR DE CRS EN: ", obj_name, "\n\n",
+        "La capa no tiene CRS definido.\n\n",
+        "Este script trabaja con distancias en metros, por lo que necesita que la capa esté en un CRS proyectado.\n\n",
+        "Por favor, define o reproyecta la capa a un CRS proyectado en metros antes de ejecutar el script.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  epsg_obj <- crs_obj$epsg
+  
+  is_longlat <- isTRUE(
+    suppressWarnings(st_is_longlat(obj))
+  )
+  
+  if (is_longlat || (!is.na(epsg_obj) && epsg_obj == 4326)) {
+    stop(
+      paste0(
+        "\nERROR DE CRS EN: ", obj_name, "\n\n",
+        "La capa está en un sistema geográfico de longitud/latitud.\n",
+        "Probablemente está en EPSG:4326 - WGS 84.\n\n",
+        "Este script trabaja con distancias en metros, por lo que NO debe ejecutarse con EPSG:4326.\n\n",
+        "Por favor, reproyecta la capa a un CRS proyectado en metros antes de ejecutar el script.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  units_obj <- tryCatch(
+    crs_obj$units_gdal,
+    error = function(e) NA_character_
+  )
+  
+  if (is.null(units_obj) || length(units_obj) == 0) {
+    units_obj <- NA_character_
+  }
+  
+  units_ok <- !is.na(units_obj) &&
+    tolower(units_obj) %in% c("metre", "meter", "metres", "meters", "m")
+  
+  if (!units_ok) {
+    stop(
+      paste0(
+        "\nERROR DE CRS EN: ", obj_name, "\n\n",
+        "La capa no parece estar en un CRS proyectado con unidades en metros.\n",
+        "CRS detectado: ", format_crs_info(obj), "\n\n",
+        "Este script calcula distancias reales en metros para el borde y la vecindad espacial.\n\n",
+        "Por favor, reproyecta la capa a un CRS proyectado en metros adecuado para tu zona de trabajo.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+check_same_crs <- function(obj1, obj2, name1, name2) {
+  
+  crs1 <- st_crs(obj1)
+  crs2 <- st_crs(obj2)
+  
+  epsg1 <- crs1$epsg
+  epsg2 <- crs2$epsg
+  
+  same_epsg <- !is.na(epsg1) && !is.na(epsg2) && epsg1 == epsg2
+  
+  same_crs <- tryCatch(
+    crs1 == crs2,
+    error = function(e) FALSE
+  )
+  
+  if (!isTRUE(same_epsg || same_crs)) {
+    stop(
+      paste0(
+        "\nERROR DE CRS\n\n",
+        "Las capas de entrada no están en el mismo CRS.\n\n",
+        name1, ": ", format_crs_info(obj1), "\n",
+        name2, ": ", format_crs_info(obj2), "\n\n",
+        "Este script necesita que la capa de rendimiento y el límite de campo estén en el mismo CRS proyectado en metros.\n\n",
+        "Por favor, reproyecta ambas capas al mismo CRS métrico antes de ejecutar el script.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+check_output_format <- function(out_file, recommended_file = NULL) {
+  
+  out_ext <- tolower(tools::file_ext(out_file))
+  
+  if (is.null(recommended_file)) {
+    recommended_file <- sub("\\.[^.]*$", ".gpkg", out_file)
+  }
+  
+  if (out_ext != "gpkg") {
+    stop(
+      paste0(
+        "\nERROR EN EL FORMATO DE SALIDA\n\n",
+        "Has indicado un archivo de salida que no está en formato GeoPackage:\n",
+        "  archivo de salida <- \"", out_file, "\"\n\n",
+        "El formato shapefile puede recortar o modificar los nombres de las columnas ",
+        "de la tabla de atributos.\n\n",
+        "Esto puede afectar a campos como 'row_number', 'VRYIELDMAS', campos de velocidad, ",
+        "dirección u otros atributos necesarios para los filtros y gráficos posteriores.\n\n",
+        "Para conservar correctamente los nombres de los campos, usa GeoPackage:\n",
+        "  archivo de salida <- \"", recommended_file, "\"\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+check_or_create_row_number <- function(obj, id_col = "row_number") {
+  
+  if (!id_col %in% names(obj)) {
+    
+    obj[[id_col]] <- seq_len(nrow(obj))
+    
+    cat(
+      "No se encontró la columna", id_col, 
+      ". Se ha creado automáticamente para identificar los puntos originales.\n"
+    )
+    
+  } else {
+    
+    if (any(is.na(obj[[id_col]]))) {
+      stop(
+        paste0(
+          "\nERROR EN EL IDENTIFICADOR ", id_col, "\n\n",
+          "La columna existe, pero contiene valores NA.\n",
+          "El campo ", id_col, " debe identificar de forma única cada punto original.\n\n",
+          "Por favor, revisa la tabla de atributos o elimina/recrea correctamente este campo antes de ejecutar el script.\n"
+        ),
+        call. = FALSE
+      )
+    }
+    
+    if (any(duplicated(obj[[id_col]]))) {
+      stop(
+        paste0(
+          "\nERROR EN EL IDENTIFICADOR ", id_col, "\n\n",
+          "La columna existe, pero contiene valores duplicados.\n",
+          "El campo ", id_col, " debe ser único para cada punto original.\n\n",
+          "Por favor, revisa la tabla de atributos o elimina/recrea correctamente este campo antes de ejecutar el script.\n"
+        ),
+        call. = FALSE
+      )
+    }
+    
+    cat(
+      "Columna", id_col, 
+      "detectada correctamente. Se conserva como identificador único de los puntos originales.\n"
+    )
+  }
+  
+  return(obj)
+}
+
+
+calc_local_limits <- function(values, nb_obj, k_iqr = 1.5, iqr_floor = 0.10) {
+  
+  n <- length(values)
+  
+  local_q1  <- rep(NA_real_, n)
+  local_q3  <- rep(NA_real_, n)
+  local_iqr <- rep(NA_real_, n)
+  local_low <- rep(NA_real_, n)
+  local_hi  <- rep(NA_real_, n)
+  local_ext <- rep(FALSE, n)
+  
+  global_iqr <- IQR(values, na.rm = TRUE)
+  
+  if (is.na(global_iqr)) {
+    global_iqr <- 0
+  }
+  
+  iqr_floor_abs <- iqr_floor * global_iqr
+  
+  for (i in seq_len(n)) {
+    
+    idx <- nb_obj[[i]]
+    
+    if (length(idx) == 0) {
+      next
+    }
+    
+    v <- values[idx]
+    v <- v[!is.na(v)]
+    
+    if (length(v) == 0) {
+      next
+    }
+    
+    q <- quantile(
+      v,
+      probs = c(0.25, 0.75),
+      na.rm = TRUE,
+      names = FALSE
+    )
+    
+    q1  <- q[1]
+    q3  <- q[2]
+    iqr <- q3 - q1
+    
+    if (is.na(iqr)) {
+      next
+    }
+    
+    iqr_eff <- max(iqr, iqr_floor_abs, na.rm = TRUE)
+    
+    low <- q1 - k_iqr * iqr_eff
+    hi  <- q3 + k_iqr * iqr_eff
+    
+    local_q1[i]  <- q1
+    local_q3[i]  <- q3
+    local_iqr[i] <- iqr
+    local_low[i] <- low
+    local_hi[i]  <- hi
+    
+    if (!is.na(values[i])) {
+      local_ext[i] <- values[i] < low | values[i] > hi
+    }
+  }
+  
+  data.frame(
+    LQ1   = local_q1,
+    LQ3   = local_q3,
+    LIQR  = local_iqr,
+    LLow  = local_low,
+    LHigh = local_hi,
+    LExt  = local_ext
+  )
+}
+
+
+plot_yield_histograms <- function(yield_before, yield_after, hist_file = NULL) {
+  
+  yield_before <- yield_before[is.finite(yield_before)]
+  yield_after  <- yield_after[is.finite(yield_after)]
+  
+  if (length(yield_before) == 0 || length(yield_after) == 0) {
+    warning("No se genera histograma porque no hay suficientes datos numéricos.")
+    return(invisible(NULL))
+  }
+  
+  old_par <- par(no.readonly = TRUE)
+  par(mfrow = c(1, 2))
+  
+  hist(
+    yield_before,
+    breaks = 50,
+    col = "grey70",
+    main = "Rendimiento original",
+    xlab = "t/ha"
+  )
+  
+  hist(
+    yield_after,
+    breaks = 50,
+    col = "darkgreen",
+    main = "Rendimiento tras limpieza",
+    xlab = "t/ha"
+  )
+  
+  par(old_par)
+  
+  if (!is.null(hist_file)) {
+    
+    png(
+      filename = hist_file,
+      width = 1800,
+      height = 800,
+      res = 150
+    )
+    
+    old_par_png <- par(no.readonly = TRUE)
+    par(mfrow = c(1, 2))
+    
+    hist(
+      yield_before,
+      breaks = 50,
+      col = "grey70",
+      main = "Rendimiento original",
+      xlab = "t/ha"
+    )
+    
+    hist(
+      yield_after,
+      breaks = 50,
+      col = "darkgreen",
+      main = "Rendimiento tras limpieza",
+      xlab = "t/ha"
+    )
+    
+    par(old_par_png)
+    dev.off()
+    
+    cat("Histograma comparativo generado en:", hist_file, "\n")
+  }
+  
+  invisible(NULL)
+}
+
+
+# --- 1. CARGA DE DATOS -----------------------------------------------------
+
+gdf0  <- st_read(file_yield, quiet = TRUE)
 field <- st_read(file_field, quiet = TRUE)
-n0    <- nrow(gdf0)
-cat("Total puntos originales:", n0, "\n")
 
-# --- 2. Paso 1: Filtros globales --------------------------------------------
+# Comprobar CRS
+check_projected_metric_crs(gdf0, "file_yield")
+check_projected_metric_crs(field, "file_field")
+check_same_crs(gdf0, field, "file_yield", "file_field")
+
+# Crear o comprobar row_number antes de eliminar cualquier punto
+gdf0 <- check_or_create_row_number(gdf0, id_col)
+
+# Comprobar campo de rendimiento
+if (!yield_col %in% names(gdf0)) {
+  
+  available_cols <- paste(names(gdf0), collapse = ", ")
+  
+  stop(
+    paste0(
+      "\nERROR EN EL CAMPO DE RENDIMIENTO\n\n",
+      "No se ha encontrado la columna indicada en yield_col:\n",
+      "  yield_col <- \"", yield_col, "\"\n\n",
+      "Columnas disponibles en la tabla de atributos:\n",
+      available_cols, "\n\n",
+      "Por favor, modifica el parámetro yield_col al inicio del script con el nombre correcto del atributo que indique el rendimiento a analizar.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+# Crear variable temporal de rendimiento para comprobarla antes de exportar
+yield_values <- suppressWarnings(as.numeric(gdf0[[yield_col]]))
+
+if (all(is.na(yield_values))) {
+  stop(
+    paste0(
+      "\nERROR EN EL CAMPO DE RENDIMIENTO\n\n",
+      "La columna indicada en yield_col existe, pero no se ha podido convertir a valores numéricos.\n",
+      "Campo usado:\n",
+      "  yield_col <- \"", yield_col, "\"\n\n",
+      "Por favor, comprueba que esta columna contiene el rendimiento en formato numérico.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+if (any(is.na(yield_values))) {
+  warning(
+    paste0(
+      "Hay ", sum(is.na(yield_values)),
+      " valores NA en el campo de rendimiento. Se eliminarán en el Paso 1.1."
+    )
+  )
+}
+
+# Exportar capa original con row_number en GeoPackage, antes de eliminar puntos
+# y antes de crear la variable interna yield.
+if (write_original_gpkg) {
+  
+  check_output_format(
+    out_original_file,
+    recommended_file = "yield_original_row_number.gpkg"
+  )
+  
+  st_write(
+    gdf0,
+    out_original_file,
+    delete_layer = TRUE,
+    quiet = TRUE
+  )
+  
+  cat("Archivo original con row_number generado en:", out_original_file, "\n")
+  cat("Este archivo debe usarse como file_inicial en el script de gráficos para comparar la capa original con:", out_file, "\n\n")
+}
+
+# Crear variable interna de rendimiento
+gdf0$yield <- yield_values
+
+# Unificar límite por seguridad
+field_union <- st_union(field)
+
+n0 <- nrow(gdf0)
+
+cat("CRS métrico de trabajo detectado:", format_crs_info(gdf0), "\n")
+cat("Campo de rendimiento usado:", yield_col, "\n")
+cat("Campo identificador usado:", id_col, "\n")
+cat("Total puntos originales:", n0, "\n\n")
+
+
+# --- 2. PASO 1: FILTROS GLOBALES -------------------------------------------
+
 gdf1 <- gdf0
 
-mask1  <- gdf1$yield <= th_yield_zero
-gdf1   <- gdf1[!mask1, ]
-n1_rem <- sum(mask1)
-cat("Paso 1.1 - Eliminados yield <=", th_yield_zero, ":", n1_rem, "\n")
+# Paso 1.1: rendimiento <= 0 o NA
+mask1 <- is.na(gdf1$yield) | gdf1$yield <= th_yield_zero
 
-dists  <- st_distance(gdf1, st_boundary(field))
-mask2  <- as.numeric(dists) <= th_edge
-gdf1   <- gdf1[!mask2, ]
-n2_rem <- sum(mask2)
+gdf1 <- gdf1[!mask1, ]
+n1_rem <- sum(mask1, na.rm = TRUE)
+
+cat("Paso 1.1 - Eliminados yield <=", th_yield_zero, "o NA:", n1_rem, "\n")
+
+
+# Paso 1.2: distancia al borde
+dists <- st_distance(gdf1, st_boundary(field_union))
+mask2 <- as.numeric(dists) <= th_edge
+
+gdf1 <- gdf1[!mask2, ]
+n2_rem <- sum(mask2, na.rm = TRUE)
+
 cat("Paso 1.2 - Eliminados a <=", th_edge, "m del borde:", n2_rem, "\n")
 
-mu     <- mean(gdf1$yield)
-sigma  <- sd(gdf1$yield)
-mask3  <- gdf1$yield < (mu - th_sd*sigma) | gdf1$yield > (mu + th_sd*sigma)
-gdf1   <- gdf1[!mask3, ]
-n3_rem <- sum(mask3)
+
+# Paso 1.3: outliers globales media ± SD
+mu    <- mean(gdf1$yield, na.rm = TRUE)
+sigma <- sd(gdf1$yield, na.rm = TRUE)
+
+mask3 <- gdf1$yield < (mu - th_sd * sigma) |
+  gdf1$yield > (mu + th_sd * sigma)
+
+gdf1 <- gdf1[!mask3, ]
+n3_rem <- sum(mask3, na.rm = TRUE)
+
 cat(sprintf("Paso 1.3 - Eliminados fuera de [mu±%s SD]: %d\n", th_sd, n3_rem))
 
-n1 <- nrow(gdf1)
-cat("Total tras Paso 1:", n1, "\n\n")
+cat("Total tras Paso 1:", nrow(gdf1), "\n\n")
 
-# --- 3. Paso 2a: Local Moran’s I (con filtro de vecinos) --------------------
+
+# --- 3. PASO 2a: LOCAL MORAN'S I + EXTREMO LOCAL ROBUSTO --------------------
+
 coords <- st_coordinates(gdf1)
-nb     <- dnearneigh(coords, 0, th_nb_dist, longlat = FALSE)
-nbsizes <- card(nb)
+
+nb <- dnearneigh(
+  coords,
+  d1 = 0,
+  d2 = th_nb_dist,
+  longlat = FALSE
+)
+
+nbsizes  <- card(nb)
 has_neigh <- nbsizes > 0
+
+cat("Diagnóstico vecinos Paso 2a:\n")
+cat("  Vecinos medios:", mean(nbsizes), "\n")
+cat("  Mediana vecinos:", median(nbsizes), "\n")
+cat("  Mínimo vecinos:", min(nbsizes), "\n")
+cat("  Máximo vecinos:", max(nbsizes), "\n")
+cat("  Puntos sin vecinos:", sum(!has_neigh), "\n\n")
 
 # Filtrar puntos sin vecinos
 gdf1_neigh <- gdf1[has_neigh, , drop = FALSE]
+n_no_neigh_rem <- sum(!has_neigh)
+
 coords_neigh <- st_coordinates(gdf1_neigh)
-nb <- dnearneigh(coords_neigh, 0, th_nb_dist, longlat = FALSE)
-lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
 
-lm_res <- localmoran(gdf1_neigh$yield, lw, zero.policy = TRUE)
-I_i    <- lm_res[, 1]
-p_raw  <- lm_res[, 5]
-p_adj  <- p.adjust(p_raw, method = "bonferroni")
-mask4  <- (I_i < 0) & (p_adj < alpha_global)
-gdf2   <- gdf1_neigh[!mask4, , drop = FALSE]
-n4_rem <- sum(mask4)
-cat("Paso 2a - Eliminados Local Moran I inliers:", n4_rem, "\n")
+nb_lm <- dnearneigh(
+  coords_neigh,
+  d1 = 0,
+  d2 = th_nb_dist,
+  longlat = FALSE
+)
 
-# --- 4. Paso 2b: Moran scatter + Cook's D -----------------------------------
-lag_yield <- lag.listw(lw, gdf2$yield, zero.policy = TRUE)
-df_fit    <- data.frame(yield = gdf2$yield, lag = lag_yield)
-fit       <- lm(yield ~ lag, data = df_fit)
+lw_lm <- nb2listw(
+  nb_lm,
+  style = "W",
+  zero.policy = TRUE
+)
 
-n5       <- nrow(df_fit)
-cooks.D  <- cooks.distance(fit)
-mask5    <- cooks.D > (cook_factor / n5)
-gdf3     <- gdf2[!mask5, , drop = FALSE]
-n5_rem   <- sum(mask5)
-cat("Paso 2b - Eliminados puntos influyentes (Cook's D):", n5_rem, "\n")
+lm_res <- localmoran(
+  gdf1_neigh$yield,
+  lw_lm,
+  zero.policy = TRUE
+)
+
+I_i   <- lm_res[, 1]
+p_raw <- lm_res[, 5]
+p_adj <- p.adjust(p_raw, method = "bonferroni")
+
+local_2a <- calc_local_limits(
+  values    = gdf1_neigh$yield,
+  nb_obj    = nb_lm,
+  k_iqr     = th_local_iqr,
+  iqr_floor = th_iqr_floor
+)
+
+moran_detected <- (I_i < 0) &
+  (p_adj < alpha_global)
+
+mask4 <- moran_detected &
+  local_2a$LExt
+
+gdf2 <- gdf1_neigh[!mask4, , drop = FALSE]
+
+n4_detected <- sum(moran_detected, na.rm = TRUE)
+n4_rem <- sum(mask4, na.rm = TRUE)
+
+cat("Paso 2a - Candidatos Local Moran I:", n4_detected, "\n")
+cat("Paso 2a - Eliminados Local Moran I + extremo local:", n4_rem, "\n")
+cat("Paso 2a - Puntos sin vecinos excluidos:", n_no_neigh_rem, "\n")
+cat("Total tras Paso 2a:", nrow(gdf2), "\n\n")
+
+
+# --- 4. PASO 2b: MORAN SCATTER + COOK'S D + EXTREMO LOCAL ROBUSTO -----------
+
+coords2 <- st_coordinates(gdf2)
+
+nb_cook <- dnearneigh(
+  coords2,
+  d1 = 0,
+  d2 = th_nb_dist,
+  longlat = FALSE
+)
+
+nbsizes2 <- card(nb_cook)
+
+cat("Diagnóstico vecinos Paso 2b:\n")
+cat("  Vecinos medios:", mean(nbsizes2), "\n")
+cat("  Mediana vecinos:", median(nbsizes2), "\n")
+cat("  Mínimo vecinos:", min(nbsizes2), "\n")
+cat("  Máximo vecinos:", max(nbsizes2), "\n")
+cat("  Puntos sin vecinos:", sum(nbsizes2 == 0), "\n\n")
+
+lw_cook <- nb2listw(
+  nb_cook,
+  style = "W",
+  zero.policy = TRUE
+)
+
+lag_yield <- lag.listw(
+  lw_cook,
+  gdf2$yield,
+  zero.policy = TRUE
+)
+
+df_fit <- data.frame(
+  yield = gdf2$yield,
+  lag   = lag_yield
+)
+
+fit <- lm(yield ~ lag, data = df_fit)
+
+n5 <- nrow(df_fit)
+
+cooks.D <- cooks.distance(fit)
+cook_threshold <- cook_factor / n5
+
+local_2b <- calc_local_limits(
+  values    = gdf2$yield,
+  nb_obj    = nb_cook,
+  k_iqr     = th_local_iqr,
+  iqr_floor = th_iqr_floor
+)
+
+cook_detected <- cooks.D > cook_threshold
+
+mask5 <- cook_detected &
+  local_2b$LExt
+
+gdf3 <- gdf2[!mask5, , drop = FALSE]
+
+n5_detected <- sum(cook_detected, na.rm = TRUE)
+n5_rem <- sum(mask5, na.rm = TRUE)
+
+cat("Paso 2b - Candidatos Cook's D:", n5_detected, "\n")
+cat("Paso 2b - Eliminados Cook's D + extremo local:", n5_rem, "\n")
+cat("Total tras Paso 2b:", nrow(gdf3), "\n\n")
+
+
+# --- 5. RESULTADO FINAL -----------------------------------------------------
 
 n_final <- nrow(gdf3)
-cat("Total puntos finales tras limpieza completa:", n_final, "\n")
-cat(sprintf("Porcentaje total eliminado: %.1f%%\n\n", 100 * (n0 - n_final) / n0))
+n_total_rem <- n0 - n_final
 
-# --- 5. Guardar resultado ---------------------------------------------------
-st_write(gdf3, out_file, delete_layer = TRUE, quiet = TRUE)
-cat("Shapefile limpio generado en:", out_file, "\n")
+cat("Resumen final:\n")
+cat("  Total puntos originales:", n0, "\n")
+cat("  Paso 1.1 eliminados:", n1_rem, "\n")
+cat("  Paso 1.2 eliminados:", n2_rem, "\n")
+cat("  Paso 1.3 eliminados:", n3_rem, "\n")
+cat("  Paso 2a sin vecinos excluidos:", n_no_neigh_rem, "\n")
+cat("  Paso 2a Candidatos Local Moran I:", n4_detected, "\n")
+cat("  Paso 2a eliminados Local Moran + extremo local:", n4_rem, "\n")
+cat("  Paso 2b Candidatos Cook's D:", n5_detected, "\n")
+cat("  Paso 2b eliminados Cook's D + extremo local:", n5_rem, "\n")
+cat("  Total puntos finales:", n_final, "\n")
+cat(sprintf("  Porcentaje total eliminado: %.1f%%\n\n", 100 * n_total_rem / n0))
+
+
+# --- 6. EXPORTACIÓN ---------------------------------------------------------
+
+check_output_format(
+  out_file,
+  recommended_file = "yield_cleaned.gpkg"
+)
+
+st_write(
+  gdf3,
+  out_file,
+  delete_layer = TRUE,
+  quiet = TRUE
+)
+
+cat("Archivo limpio generado en:", out_file, "\n")
+cat("CRS de salida:", format_crs_info(gdf3), "\n\n")
+
+if (write_original_gpkg) {
+  cat("Para el script de gráficos del Protocolo Vega usa:\n")
+  cat("  file_inicial <- \"", out_original_file, "\"\n", sep = "")
+  cat("  file_final   <- \"", out_file, "\"\n\n", sep = "")
+}
+
+
+# --- 7. HISTOGRAMA COMPARATIVO ---------------------------------------------
+
+if (make_histogram) {
+  plot_yield_histograms(
+    yield_before = gdf0$yield,
+    yield_after  = gdf3$yield,
+    hist_file    = hist_file
+  )
+}
