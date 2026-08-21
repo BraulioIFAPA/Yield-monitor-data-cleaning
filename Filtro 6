@@ -1,35 +1,291 @@
-# --- 1. Carga de paquetes y directorio de trabajo ---
+# =============================================================================
+# FILTRO 6 - ELIMINACIÓN DE PUNTOS PRÓXIMOS A LÍNEAS ENTRE TRATAMIENTOS
+#
+# Objetivo:
+#   - Eliminar registros próximos a líneas de separación entre tratamientos,
+#     donde la cosechadora puede haber cosechado simultáneamente dos o más
+#     estrategias diferentes.
+#
+# Requisito:
+#   - Los datos de entrada deben estar ya en un CRS proyectado en metros.
+#   - No usar EPSG:4326 - WGS 84 para ejecutar este script.
+#   - La capa de rendimiento y la capa de líneas de tratamiento deben estar en el mismo CRS.
+#
+# Entrada habitual:
+#   - yield_no_roads.gpkg
+#
+# Salida:
+#   - yield_no_treatchange.gpkg
+# =============================================================================
+
+
+# --- 1. PARÁMETROS ----------------------------------------------------------
+
+file_yield <- "yield_no_roads.gpkg"
+file_treat <- "Pon_aqui_el_nombre_del_archivo_de_lineas_que_definen_los_diversos_tratamientos.shp"
+out_file   <- "yield_no_treatchange.gpkg"
+
+# Distancia máxima a líneas de separación entre tratamientos para eliminar puntos
+# Modifícalo según el ancho de corte de tu cosechadora
+th_treat <- 8
+
+
+# --- 2. CARGA DE PAQUETES --------------------------------------------------
+
 library(sf)
 
-# --- 2. Carga de datos ---
-pts   <- st_read("yield_no_roads.shp",     quiet = TRUE)  # puntos ya limpios
-strps <- st_read("Put_here_the_name_of_the_line_or_polygon_file_that_defines_the_treatments.shp",   quiet = TRUE)  # líneas o polígonos que definen los tratamientos
 
-# --- 3. Parámetro ---
-th_treat <- 8  # metros
+# --- 3. FUNCIONES AUXILIARES -----------------------------------------------
 
-# --- 4. Cálculo de distancias y máscara ---
-# 4.1 matriz distancias: cada punto vs cada línea
-d_mat <- st_distance(pts, strps)
+format_crs_info <- function(obj) {
+  
+  crs_obj <- st_crs(obj)
+  epsg_obj <- crs_obj$epsg
+  
+  units_obj <- tryCatch(
+    crs_obj$units_gdal,
+    error = function(e) NA_character_
+  )
+  
+  if (is.null(units_obj) || length(units_obj) == 0) {
+    units_obj <- NA_character_
+  }
+  
+  if (!is.na(epsg_obj)) {
+    crs_txt <- paste0("EPSG:", epsg_obj)
+  } else {
+    crs_txt <- crs_obj$input
+  }
+  
+  if (!is.na(units_obj)) {
+    
+    units_lower <- tolower(units_obj)
+    
+    units_txt <- if (units_lower %in% c("metre", "meter", "metres", "meters", "m")) {
+      "metros"
+    } else if (units_lower %in% c("degree", "degrees", "degree minute second")) {
+      "grados"
+    } else {
+      units_obj
+    }
+    
+    crs_txt <- paste0(crs_txt, " | unidades: ", units_txt)
+  }
+  
+  return(crs_txt)
+}
 
-# 4.2 distancia mínima por punto
-min_d <- apply(d_mat, 1, min)
 
-# 4.3 puntos a eliminar
-mask_t <- as.numeric(min_d) <= th_treat
+check_projected_metric_crs <- function(obj, obj_name) {
+  
+  crs_obj <- st_crs(obj)
+  
+  if (is.na(crs_obj)) {
+    stop(
+      paste0(
+        "\nERROR DE CRS EN: ", obj_name, "\n\n",
+        "La capa no tiene CRS definido.\n\n",
+        "Este script trabaja con distancias en metros, por lo que necesita que la capa esté en un CRS proyectado.\n\n",
+        "Por favor, define o reproyecta la capa a un CRS proyectado en metros antes de ejecutar el script.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  epsg_obj <- crs_obj$epsg
+  
+  is_longlat <- isTRUE(
+    suppressWarnings(st_is_longlat(obj))
+  )
+  
+  if (is_longlat || (!is.na(epsg_obj) && epsg_obj == 4326)) {
+    stop(
+      paste0(
+        "\nERROR DE CRS EN: ", obj_name, "\n\n",
+        "La capa está en un sistema geográfico de longitud/latitud.\n",
+        "Probablemente está en EPSG:4326 - WGS 84.\n\n",
+        "Este script trabaja con distancias en metros, por lo que NO debe ejecutarse con EPSG:4326.\n\n",
+        "Por favor, reproyecta la capa a un CRS proyectado en metros antes de ejecutar el script.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  units_obj <- tryCatch(
+    crs_obj$units_gdal,
+    error = function(e) NA_character_
+  )
+  
+  if (is.null(units_obj) || length(units_obj) == 0) {
+    units_obj <- NA_character_
+  }
+  
+  units_ok <- !is.na(units_obj) &&
+    tolower(units_obj) %in% c("metre", "meter", "metres", "meters", "m")
+  
+  if (!units_ok) {
+    stop(
+      paste0(
+        "\nERROR DE CRS EN: ", obj_name, "\n\n",
+        "La capa no parece estar en un CRS proyectado con unidades en metros.\n",
+        "CRS detectado: ", format_crs_info(obj), "\n\n",
+        "Este script calcula distancias reales en metros para eliminar puntos próximos a líneas entre tratamientos.\n\n",
+        "Por favor, reproyecta la capa a un CRS proyectado en metros adecuado para tu zona de trabajo.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
 
-# 4.4 nueva capa sin esos puntos
+
+check_same_crs <- function(obj1, obj2, name1, name2) {
+  
+  crs1 <- st_crs(obj1)
+  crs2 <- st_crs(obj2)
+  
+  epsg1 <- crs1$epsg
+  epsg2 <- crs2$epsg
+  
+  same_epsg <- !is.na(epsg1) && !is.na(epsg2) && epsg1 == epsg2
+  
+  same_crs <- tryCatch(
+    crs1 == crs2,
+    error = function(e) FALSE
+  )
+  
+  if (!isTRUE(same_epsg || same_crs)) {
+    stop(
+      paste0(
+        "\nERROR DE CRS\n\n",
+        "Las capas de entrada no están en el mismo CRS.\n\n",
+        name1, ": ", format_crs_info(obj1), "\n",
+        name2, ": ", format_crs_info(obj2), "\n\n",
+        "Este script necesita que la capa de rendimiento y la capa de líneas entre tratamientos estén en el mismo CRS proyectado en metros.\n\n",
+        "Por favor, reproyecta ambas capas al mismo CRS métrico antes de ejecutar el script.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+check_output_format <- function(out_file) {
+  
+  out_ext <- tolower(tools::file_ext(out_file))
+  
+  if (out_ext == "shp") {
+    stop(
+      paste0(
+        "\nERROR EN EL FORMATO DE SALIDA\n\n",
+        "Has indicado un archivo de salida en formato ESRI Shapefile:\n",
+        "  out_file <- \"", out_file, "\"\n\n",
+        "El formato shapefile puede recortar o modificar los nombres de las columnas ",
+        "de la tabla de atributos.\n\n",
+        "Esto puede afectar a campos como 'row_number', 'VRYIELDMAS', campos de velocidad, ",
+        "dirección u otros atributos necesarios para los filtros y gráficos posteriores.\n\n",
+        "Para conservar correctamente los nombres de los campos, usa GeoPackage:\n",
+        "  out_file <- \"yield_no_treatchange.gpkg\"\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+check_line_geometry <- function(obj, obj_name) {
+  
+  geom_types <- unique(as.character(st_geometry_type(obj)))
+  
+  valid_line_types <- c("LINESTRING", "MULTILINESTRING")
+  
+  if (!all(geom_types %in% valid_line_types)) {
+    stop(
+      paste0(
+        "\nERROR EN LA CAPA DE LÍNEAS ENTRE TRATAMIENTOS\n\n",
+        "La capa indicada en ", obj_name, " debe contener únicamente geometrías de tipo línea.\n\n",
+        "Tipos de geometría detectados:\n",
+        paste(geom_types, collapse = ", "), "\n\n",
+        "Por favor, utiliza una capa de líneas que representen las separaciones entre tratamientos o estrategias.\n",
+        "No utilices una capa de polígonos para este filtro.\n\n",
+        "Si tienes una capa de polígonos de tratamientos y necesitas obtener líneas en QGIS:\n",
+        "  1. Abre tu capa de polígonos en QGIS y selecciónala.\n",
+        "  2. Ve a Vectorial > Herramientas de geometría.\n",
+        "  3. Ejecuta la herramienta Polígonos a líneas.\n",
+        "  4. Guarda el archivo en tu carpeta de trabajo con el CRS proyectado correspondiente.\n",
+        "  5. Revisa la capa resultante antes de usarla en este filtro.\n\n",
+        "Ten en cuenta que una capa obtenida desde polígonos puede incluir también el perímetro exterior ",
+        "u otras líneas no deseadas. Para este filtro interesa trabajar preferentemente con las líneas internas ",
+        "de separación entre tratamientos.\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+# --- 4. CARGA DE DATOS ------------------------------------------------------
+
+pts   <- st_read(file_yield, quiet = TRUE)
+strps <- st_read(file_treat, quiet = TRUE)
+
+# Comprobar CRS
+check_projected_metric_crs(pts, "file_yield")
+check_projected_metric_crs(strps, "file_treat")
+check_same_crs(pts, strps, "file_yield", "file_treat")
+
+# Comprobar que la capa de tratamientos contiene líneas
+check_line_geometry(strps, "file_treat")
+
+if (nrow(strps) == 0) {
+  stop(
+    paste0(
+      "\nERROR EN LA CAPA DE LÍNEAS ENTRE TRATAMIENTOS\n\n",
+      "La capa indicada en file_treat no contiene geometrías.\n",
+      "Por favor, comprueba que el archivo de líneas entre tratamientos es correcto antes de ejecutar el script.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+cat("CRS métrico de trabajo detectado:", format_crs_info(pts), "\n")
+cat("Puntos de entrada:", nrow(pts), "\n")
+cat("Elementos en capa de líneas entre tratamientos:", nrow(strps), "\n\n")
+
+
+# --- 5. FILTRO 6: ELIMINAR PUNTOS A <= 8 m DE LÍNEAS ENTRE TRATAMIENTOS -----
+
+# Unificar líneas de tratamiento por seguridad
+treat_lines <- st_union(strps)
+
+# Calcula distancia mínima de cada punto al conjunto de líneas entre tratamientos
+d_treat <- st_distance(pts, treat_lines)
+mask_t  <- as.numeric(d_treat) <= th_treat
+
 pts2 <- pts[!mask_t, ]
 
-# 4.5 mensaje de resumen
-cat("Puntos antes del filtro 2:", nrow(pts), "\n")
-cat("Eliminados a ≤", th_treat, "m de líneas de tratamiento:", sum(mask_t), "\n")
-cat("Puntos restantes:", nrow(pts2), "\n")
+cat("Puntos antes del filtro 6:", nrow(pts), "\n")
+cat("Eliminados a ≤", th_treat, "m de líneas entre tratamientos:", sum(mask_t), "\n")
+cat("Puntos restantes:", nrow(pts2), "\n\n")
 
-# --- 5. Guardar resultado ---
-st_write(pts2,
-         "yield_no_treatchange.shp",
-         delete_layer = TRUE,
-         quiet = TRUE)
 
-cat("Shapefile guardado como yield_no_treatchange.shp\n")
+# --- 6. GUARDAR RESULTADO --------------------------------------------------
+
+check_output_format(out_file)
+
+st_write(
+  pts2,
+  out_file,
+  delete_layer = TRUE,
+  quiet = TRUE
+)
+
+cat("Archivo guardado como:", out_file, "\n")
+cat("CRS de salida:", format_crs_info(pts2), "\n")
