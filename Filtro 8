@@ -1,44 +1,238 @@
+# =============================================================================
+# FILTRO 8 - ELIMINACIÓN DE REGISTROS CON DIRECCIÓN INESPERADA DE AVANCE
+#
+# Objetivo:
+#   - Eliminar puntos asociados a zonas ya cosechadas, pasadas incompletas
+#     del cabezal o direcciones inesperadas de avance de la cosechadora.
+#
+# Nota:
+#   - Este filtro usa un campo de dirección ya registrado por la cosechadora,
+#     expresado normalmente en grados entre 0 y 360.
+#   - No recalcula direcciones a partir de las coordenadas.
+#   - Por tanto, no necesita transformar el CRS.
+#
+# Entrada habitual:
+#   - yield_speed_filtered.gpkg
+#
+# Salida:
+#   - yield_unexpected_direction.gpkg
+# =============================================================================
+
+
+# --- 1. CARGA DE PAQUETES --------------------------------------------------
+
 library(sf)
 
-# --- 1) Carga de datos (entrada y salida solicitadas) ---
-pts <- st_read("yield_speed_filtered.shp", quiet = TRUE)
 
-# --- 2) Parámetros editables ---
-field_heading <- "Heading"                 # <- Cambia aquí el nombre del campo si fuese necesario
-keep_ranges   <- list(c(270, 290),         # <- Rango 1 a mantener (incluye extremos)
-                      c(90, 110))          # <- Rango 2 a mantener (incluye extremos)
-# Para añadir más rangos: p.ej., keep_ranges <- list(c(270,290), c(90,110), c(10,20))
+# --- 2. PARÁMETROS ----------------------------------------------------------
 
-# --- 3) Construir máscara de puntos a mantener (dentro de alguno de los rangos) ---
-h <- pts[[field_heading]]
-if (!is.numeric(h)) stop(sprintf("El campo '%s' debe ser numérico (0–360 grados).", field_heading))
+file_yield <- "yield_speed_filtered.gpkg"
+out_file   <- "yield_unexpected_direction.gpkg"
+
+# Campo de la tabla de atributos que contiene la dirección de avance.
+# Modificar si el archivo usa otro nombre de columna.
+heading_col <- "Heading"
+
+# Rangos de dirección a mantener, expresados en grados.
+# Cada rango se define como c(valor_min, valor_max).
+keep_ranges <- list(
+  c(270, 290),
+  c(90, 110)
+)
+
+# Para añadir más rangos:
+# keep_ranges <- list(c(270, 290), c(90, 110), c(10, 20))
+
+# También se admiten rangos que cruzan 0/360.
+# Por ejemplo, para mantener direcciones entre 350º y 10º:
+# keep_ranges <- list(c(350, 10))
+
+
+# --- 3. FUNCIONES AUXILIARES -----------------------------------------------
+
+check_output_format <- function(out_file) {
+  
+  out_ext <- tolower(tools::file_ext(out_file))
+  
+  if (out_ext == "shp") {
+    stop(
+      paste0(
+        "\nERROR EN EL FORMATO DE SALIDA\n\n",
+        "Has indicado un archivo de salida en formato ESRI Shapefile:\n",
+        "  out_file <- \"", out_file, "\"\n\n",
+        "El formato shapefile puede recortar o modificar los nombres de las columnas ",
+        "de la tabla de atributos.\n\n",
+        "Esto puede afectar a campos como 'row_number', 'VRYIELDMAS', campos de velocidad, ",
+        "dirección u otros atributos necesarios para los filtros y gráficos posteriores.\n\n",
+        "Para conservar correctamente los nombres de los campos, usa GeoPackage:\n",
+        "  out_file <- \"yield_unexpected_direction.gpkg\"\n"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+# --- 4. CARGA DE DATOS ------------------------------------------------------
+
+pts <- st_read(file_yield, quiet = TRUE)
+
+
+# --- 5. COMPROBAR CAMPO DE DIRECCIÓN ---------------------------------------
+
+if (!heading_col %in% names(pts)) {
+  
+  available_cols <- paste(names(pts), collapse = ", ")
+  
+  stop(
+    paste0(
+      "\nERROR EN EL CAMPO DE DIRECCIÓN\n\n",
+      "No se ha encontrado la columna indicada en heading_col:\n",
+      "  heading_col <- \"", heading_col, "\"\n\n",
+      "Columnas disponibles en la tabla de atributos:\n",
+      available_cols, "\n\n",
+      "Por favor, modifica el parámetro heading_col al inicio del script con el nombre correcto.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+# Crear variable interna de dirección
+h <- suppressWarnings(as.numeric(pts[[heading_col]]))
+
+if (all(is.na(h))) {
+  stop(
+    paste0(
+      "\nERROR EN EL CAMPO DE DIRECCIÓN\n\n",
+      "La columna indicada en heading_col existe, pero no se ha podido convertir a valores numéricos.\n",
+      "Campo usado:\n",
+      "  heading_col <- \"", heading_col, "\"\n\n",
+      "Por favor, comprueba que esta columna contiene la dirección de avance en grados, normalmente entre 0 y 360.\n"
+    ),
+    call. = FALSE
+  )
+}
+
+if (any(is.na(h))) {
+  warning(
+    paste0(
+      "Hay ", sum(is.na(h)),
+      " valores NA en el campo de dirección. Se eliminarán en el filtro de dirección."
+    )
+  )
+}
+
+if (any(!is.na(h) & (h < 0 | h > 360))) {
+  warning(
+    paste0(
+      "Hay ", sum(!is.na(h) & (h < 0 | h > 360)),
+      " valores de dirección fuera del rango esperado 0-360 grados. ",
+      "Se tratarán como fuera de los rangos válidos y se eliminarán."
+    )
+  )
+}
+
+
+# --- 6. COMPROBAR RANGOS DE DIRECCIÓN --------------------------------------
+
+for (r in keep_ranges) {
+  
+  if (!is.numeric(r) || length(r) != 2) {
+    stop(
+      "\nERROR EN keep_ranges\n\n",
+      "Cada rango debe ser un vector numérico de longitud 2, por ejemplo:\n",
+      "  c(270, 290)\n",
+      call. = FALSE
+    )
+  }
+  
+  if (any(is.na(r)) || any(r < 0 | r > 360)) {
+    stop(
+      "\nERROR EN keep_ranges\n\n",
+      "Los rangos de dirección deben estar expresados en grados entre 0 y 360.\n",
+      "Ejemplo correcto:\n",
+      "  keep_ranges <- list(c(270, 290), c(90, 110))\n",
+      call. = FALSE
+    )
+  }
+}
+
+
+# --- 7. CONSTRUIR MÁSCARA DE PUNTOS A MANTENER -----------------------------
 
 mask_keep <- rep(FALSE, length(h))
-for (r in keep_ranges) {
-  if (length(r) != 2) stop("Cada rango debe ser un vector de longitud 2: c(min, max).")
-  mask_keep <- mask_keep | (h >= r[1] & h <= r[2])
-}
-mask_keep[is.na(h)] <- FALSE  # descartar NAs
 
-# --- 4) Aplicar filtro (eliminar fuera de rango) ---
+for (r in keep_ranges) {
+  
+  r_min <- r[1]
+  r_max <- r[2]
+  
+  if (r_min <= r_max) {
+    
+    # Rango normal, por ejemplo c(90, 110)
+    mask_keep <- mask_keep | (h >= r_min & h <= r_max)
+    
+  } else {
+    
+    # Rango que cruza 0/360, por ejemplo c(350, 10)
+    mask_keep <- mask_keep | (h >= r_min | h <= r_max)
+  }
+}
+
+# Descartar NA y valores fuera de 0-360
+mask_keep[is.na(h)] <- FALSE
+mask_keep[h < 0 | h > 360] <- FALSE
+
+
+# --- 8. APLICAR FILTRO ------------------------------------------------------
+
 pts_heading_filtered <- pts[mask_keep, ]
 
-# --- 5) Mensaje/resumen ---
+
+# --- 9. MENSAJE DE RESUMEN --------------------------------------------------
+
 total_original <- nrow(pts)
 total_final    <- nrow(pts_heading_filtered)
 total_removed  <- total_original - total_final
-perc_removed   <- if (total_original > 0) 100 * total_removed / total_original else NA_real_
+perc_removed   <- if (total_original > 0) {
+  100 * total_removed / total_original
+} else {
+  NA_real_
+}
 
 rangos_txt <- paste0(
-  vapply(keep_ranges, function(r) sprintf("[%.2f, %.2f]", r[1], r[2]), character(1)),
+  vapply(
+    keep_ranges,
+    function(r) sprintf("[%.2f, %.2f]", r[1], r[2]),
+    character(1)
+  ),
   collapse = " U "
 )
 
-cat(sprintf("Filtro Heading en %s: mantenidos %d de %d (eliminados %d, %.2f%%)\n",
-            rangos_txt, total_final, total_original, total_removed, perc_removed))
+cat(sprintf(
+  "Filtro dirección en %s grados: mantenidos %d de %d puntos (eliminados %d, %.2f%%)\n",
+  rangos_txt,
+  total_final,
+  total_original,
+  total_removed,
+  perc_removed
+))
 
-# --- 6) Guardar ---
-st_write(pts_heading_filtered,
-         "yield_unexpected_direction.shp",
-         delete_layer = TRUE,
-         quiet = TRUE)
+cat("Campo de dirección usado:", heading_col, "\n\n")
+
+
+# --- 10. GUARDAR RESULTADO --------------------------------------------------
+
+check_output_format(out_file)
+
+st_write(
+  pts_heading_filtered,
+  out_file,
+  delete_layer = TRUE,
+  quiet = TRUE
+)
+
+cat("Archivo guardado como:", out_file, "\n")
+
