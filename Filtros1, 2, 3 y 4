@@ -14,12 +14,23 @@
 # --- PARÁMETROS ------------------------------------------------------------
 
 # Modificar yield_data y field_boundary por los archivos de datos brutos original y parcela correspondientes
-file_yield <- "yield_data.shp"
-file_field <- "field_boundary.shp"
+file_yield <- "yield_data25830.shp"
+file_field <- "field_boundary25830.shp"
+
+# th_edge se refiere a la distancia desde el borde de la parcela a partir del cual eliminar datos
+# y, por ello, variará según las parcelas de estudio.
+# Modificar th_edge según se crea conveniente para eliminar el efecto borde
+# (un buen truco es correr el código tal y como está y ver resultados con script Gráficos de Datos Eliminados) 
+th_yield_zero <- 0
+th_edge       <- 10
+th_sd         <- 3
+th_nb_dist    <- 40
+alpha_global  <- 0.05
+cook_factor   <- 4
 
 # Archivo original convertido a GeoPackage con row_number.
 # Este archivo debe usarse como file_inicial en el script de gráficos
-# cuando se compare la capa original con la salida limpia de Vega.
+# cuando se compare la capa original con la salida limpia basada en Vega.
 out_original_file <- "yield_original_row_number.gpkg"
 
 # Archivo limpio final
@@ -35,13 +46,6 @@ yield_col <- "VRYIELDMAS"
 # Campo identificador único para comparar capas iniciales y finales.
 # Si no existe, el script lo crea automáticamente.
 id_col <- "row_number"
-
-th_yield_zero <- 0
-th_edge       <- 10
-th_sd         <- 3
-th_nb_dist    <- 40
-alpha_global  <- 0.05
-cook_factor   <- 4
 
 # Regla robusta local tipo IQR:
 # Q1_local - 1.5 * IQR_local
