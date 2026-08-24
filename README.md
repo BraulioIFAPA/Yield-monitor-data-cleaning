@@ -44,18 +44,18 @@ El flujo de limpieza está organizado en varios scripts:
 5. **Filtro 8**  
    Eliminación de registros con direcciones de avance no esperadas.
 
-6. **Gráficos de auditoría**  
+Extra. **Gráficos de auditoría**  
    Generación de gráficos comparativos entre la capa anterior y posterior a cada filtro.
 
 Algunos filtros contextuales pueden omitirse si no son aplicables a una parcela concreta. Por ejemplo, el Filtro 5 puede omitirse si no existen caminos interiores en el campo o el Filtro 7 de velocidad si los registros que elimina son similares a los anteriores y posteriores según el orden de cosecha.
 
-## Identificador `row_number`
+## Identificador row_number
 
-El flujo genera y conserva un identificador único denominado `row_number`.
+El flujo genera y conserva un identificador único denominado row_number.
 
 Este campo permite comparar capas antes y después de cada filtro, identificando qué puntos se han mantenido y cuáles se han eliminado. Es especialmente importante para los gráficos de auditoría.
 
-El archivo generado por los Filtros 1, 2, 3 y 4 incluye una copia de la capa original en GeoPackage con `row_number`, que debe utilizarse como capa inicial cuando se quieran representar los puntos eliminados por el primer bloque de filtros.
+El archivo generado por los Filtros 1, 2, 3 y 4 incluye una copia de la capa original en GeoPackage con row_number, que debe utilizarse como capa inicial cuando se quieran representar los puntos eliminados por el primer bloque de filtros.
 
 ## Criterio local basado en IQR y regla de Tukey
 
@@ -108,6 +108,7 @@ Antes de ejecutar los filtros, se recomienda revisar que:
 - Los nombres de los campos de rendimiento, velocidad y dirección coincidan con los definidos en cada script.
 - El Filtro 5 solo debe aplicarse cuando existan caminos interiores u otras líneas equivalentes que justifiquen su uso.
 - El Filtro 6 debe aplicarse con líneas de separación entre tratamientos, no con polígonos.
+- El Filtro 7 de velocidad no debe aplicarse si los registros que elimina son similares en rendimiento a los anteriores y posteriores, según el orden de cosecha.
 
 ## Uso previsto
 
