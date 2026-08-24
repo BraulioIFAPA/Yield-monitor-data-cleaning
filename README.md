@@ -19,7 +19,7 @@ Los datos de entrada deben cumplir los siguientes requisitos:
 - Las capas espaciales deben estar en un CRS proyectado en metros.
 - No debe ejecutarse el flujo con EPSG:4326 / WGS 84.
 - Las capas utilizadas conjuntamente deben estar en el mismo CRS.
-- Las salidas vectoriales se generan en formato GeoPackage (`.gpkg`).
+- Las salidas vectoriales se generan en formato GeoPackage (.gpkg).
 - El campo de rendimiento y, cuando proceda, los campos de velocidad o dirección deben existir en la tabla de atributos.
 
 El uso de GeoPackage evita problemas habituales del formato shapefile, como el recorte o modificación de nombres de columnas.
