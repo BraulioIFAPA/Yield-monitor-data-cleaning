@@ -3,11 +3,20 @@
 #
 # Objetivo:
 #   - Eliminar puntos asociados a zonas ya cosechadas, pasadas incompletas
-#     del cabezal o direcciones inesperadas de avance de la cosechadora.
+#     del cabezal, giros, maniobras o direcciones inesperadas de avance
+#     de la cosechadora.
 #
 # Nota:
 #   - Este filtro usa un campo de dirección ya registrado por la cosechadora,
 #     expresado normalmente en grados entre 0 y 360.
+#   - La dirección indica el rumbo o sentido de avance de la máquina durante
+#     la cosecha.
+#   - En una cosecha normal en pasadas paralelas, la máquina suele avanzar en
+#     dos direcciones principales de ida y vuelta. Pero también suele haber dos 
+#     direcciones perpendiculares a las principales, normalmente en cabeceras.
+#     ESTAS DIRECCIONES SON LOS RANGOS A MANTENER. Cambia los valores en PARÁMETROS (keep_ranges).
+#   - Los puntos registrados durante giros, maniobras, zonas ya cosechadas o
+#     pasadas incompletas pueden presentar direcciones diferentes.
 #   - No recalcula direcciones a partir de las coordenadas.
 #   - Por tanto, no necesita transformar el CRS.
 #
@@ -26,7 +35,7 @@ library(sf)
 
 # --- 2. PARÁMETROS ----------------------------------------------------------
 
-file_yield <- "yield_speed_filtered.gpkg"
+file_yield <- "yield_cleaned.gpkg"
 out_file   <- "yield_unexpected_direction.gpkg"
 
 # Campo de la tabla de atributos que contiene la dirección de avance.
@@ -34,13 +43,22 @@ out_file   <- "yield_unexpected_direction.gpkg"
 heading_col <- "Heading"
 
 # Rangos de dirección a mantener, expresados en grados.
-# Cada rango se define como c(valor_min, valor_max).
+#
+# Este filtro conserva únicamente los puntos cuya dirección de avance esté dentro
+# de los rangos definidos en keep_ranges.
+#
+# IMPORTANTE:
+# Cambia los valores de keep_ranges según las direcciones reales de cosecha
+# observadas en tus datos.
+#
+# Cada línea c(valor_min, valor_max) define un rango de direcciones a conservar.
+
 keep_ranges <- list(
   c(270, 290),
   c(90, 110)
 )
-
-# Para añadir más rangos:
+# Para añadir más rangos, añade más líneas c(valor_min, valor_max) dentro de list().
+# Ejemplo para conservar más de dos rangos de dirección:
 # keep_ranges <- list(c(270, 290), c(90, 110), c(10, 20))
 
 # También se admiten rangos que cruzan 0/360.
@@ -235,4 +253,3 @@ st_write(
 )
 
 cat("Archivo guardado como:", out_file, "\n")
-
