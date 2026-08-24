@@ -281,4 +281,3 @@ st_write(
 
 cat("Archivo limpio sin datos junto a caminos:", out_file, "\n")
 cat("CRS de salida:", format_crs_info(gdf_no_roads), "\n")
-
