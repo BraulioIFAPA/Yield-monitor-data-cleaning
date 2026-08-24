@@ -44,8 +44,8 @@ El flujo de limpieza está organizado en varios scripts:
 5. **Filtro 8**  
    Eliminación de registros con direcciones de avance no esperadas.
 
-Extra. **Gráficos de auditoría**  
-   Generación de gráficos comparativos entre la capa anterior y posterior a cada filtro.
+   **Extra. Gráficos de datos eliminados y permanentes**  
+   La publicación cuenta con un código extra para la generación de gráficos comparativos, entre la capa anterior y posterior a cada filtro.
 
 Algunos filtros contextuales pueden omitirse si no son aplicables a una parcela concreta. Por ejemplo, el Filtro 5 puede omitirse si no existen caminos interiores en el campo o el Filtro 7 de velocidad si los registros que elimina son similares a los anteriores y posteriores según el orden de cosecha.
 
