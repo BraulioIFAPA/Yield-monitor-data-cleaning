@@ -19,7 +19,10 @@ file_field <- "field_boundary25830.shp"
 
 # th_edge se refiere a la distancia desde el borde de la parcela a partir del cual eliminar datos
 # y, por ello, variará según las parcelas de estudio.
-# Modificar th_edge según se crea conveniente para eliminar el efecto borde
+# Modificar th_edge según se crea conveniente para eliminar el efecto borde.
+# Si queremos mantener todos los datos válidos del borde, el dato a poner
+# debe ser menor a la mitad del ancho del cabezal de corte de la cosechadora,
+# así solo eliminaremos datos donde la cosechadora se ha salido de la parcela (ancho de cabezal incompleto).
 # (un buen truco es correr el código tal y como está y ver resultados con script Gráficos de Datos Eliminados) 
 th_yield_zero <- 0
 th_edge       <- 10
